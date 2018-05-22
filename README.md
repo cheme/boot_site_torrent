@@ -9,3 +9,5 @@ Next step will be to boot them from external site with hash checking (reduce ban
 Script is as basic as possible just for testing (do not use).
 
 Only tested on chromium, no care for old browser (especially webcrypto requirement).
+
+Currently biased on angular application (see dirty ReplaceContent method) but could be extended to single page appli.

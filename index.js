@@ -118,6 +118,9 @@ async function loadSite(blob) {
   var zipFiles = await zip.loadAsync(blob);
   var unzipBootBlobs = {};
   window.unzipBootBlobs = unzipBootBlobs;
+  if (isFirefox()) {
+    window.ffscripttoeval = {};
+  }
   var indexHtml;
   for (var n in zipFiles.files) {
     var file = zipFiles.files[n];
@@ -130,6 +133,12 @@ async function loadSite(blob) {
         fr.readAsText(b);
         await frp;
         indexHtml = fr.result;
+      } else if (file.name.endsWith('.js') && isFirefox()) {
+        var fr = new FileReader();
+        var frp = frPromise(fr);
+        fr.readAsText(b);
+        await frp;
+        window.ffscripttoeval[file.name] = fr.result;
       } else {
         var url = URL.createObjectURL(b);
         b.url = url;
@@ -241,11 +250,35 @@ function frPromise(fr) {
 }
 
 function ReplaceContent(NC) {
-  document.open();
-  document.write(NC);
-  document.close();
+  let curr = window.location.pathname + window.location.search;
+  // allow back after refresh failure
+  window.history.pushState(window.state,"boot",curr);
+  if (isFirefox()) {
+    // TODO regexp it or at least allow uppercase
+    var start = window.indexBootBlob.indexOf("<head>") + 6; 
+    var end = window.indexBootBlob.indexOf("</head>");
+    document.head.innerHTML = window.indexBootBlob.substring(start,end);
+    start = window.indexBootBlob.indexOf("<body>") + 6; 
+    end = window.indexBootBlob.indexOf("</body>");
+    document.body.innerHTML = window.indexBootBlob.substring(start,end);
+
+    // eval all new script tag (modernjs)
+    document.querySelectorAll('script').forEach((s)=> {
+      var s = window.ffscripttoeval[s.getAttribute('src')];
+      if (s != null) {
+        eval(s);
+      }
+    });
+  } else {
+    document.open();
+    document.write(NC);
+    document.close();
+  }
 }
 
+function isFirefox() {
+ return navigator.userAgent.search("Firefox") > 0;
+}
 /*
  *{
   announce: [String],        // Torrent trackers to use (added to list in .torrent or magnet uri)
