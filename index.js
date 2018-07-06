@@ -2,7 +2,10 @@ window.indexedDB = window.indexedDB || window.mozIndexedDB || window.webkitIndex
  
 window.IDBTransaction = window.IDBTransaction || window.webkitIDBTransaction || window.msIDBTransaction;
 
-window.IDBKeyRange = window.IDBKeyRange || window.webkitIDBKeyRange || window.msIDBKeyRange
+window.IDBKeyRange = window.IDBKeyRange || window.webkitIDBKeyRange || window.msIDBKeyRange;
+
+const bsNs = "bs_ns_";
+
 async function run() {
 var db;
 if (!window.indexedDB) {
@@ -22,12 +25,22 @@ if (sep > 0) {
   shaarch = shaarch.substring(0,sep);
 }
 
+var lastHash = await readVal(db,'','lastHash');
 if (shaarch.length != 64) {
+  shaarch = lastHash;
+}
+
+var unsafe = await readVal(db,'','unsafe');
+
+if (!shaarch || shaarch.length != 64) {
   console.error("Invalid sha256, syntax is ? + sha256 as 64 char hex string + (not mandatory) & + encodeURI(magnetlink) ");
 } else {
+  window.bootSite = {
+    'unsafe' : unsafe
+  };
   console.log("bootstrapping from : " + magnet);
   console.log("with sha256 : " + shaarch);
-  console.log("torrent will be store in window.torr");
+  console.log("torrent will be store in window.bootSite.torr");
   var client = new WebTorrent();
   client.on('error', function (err) {
     console.error('ERROR: ' + err.message)
@@ -42,14 +55,14 @@ if (shaarch.length != 64) {
   if (blobSite == null) {
     // download from magnet
     var torr = await new Promise((resolve,reject) => client.add(magnet,resolve));
-    window.torr = torr;
+    window.bootSite.torr = torr;
     await torrPromise(torr);
     var blob = await getFirstFile(torr);
     var ok = await check_sha256(blob,shaarch);
     if (ok) {
       // rem await to run in paralell??
       await blobInStorage(db,shaarch,blob,magnet,torr.announce,torr.name);
-      loadSite(blob);
+      loadSite(blob,db,lastHash,shaarch);
     } else {
       console.error("wrong hash from torrent, do not load");
     }
@@ -61,8 +74,8 @@ if (shaarch.length != 64) {
     }, resolve));
 
     console.log("start seeding site from storage");
-    window.torr = torr;
-    loadSite(await getFirstFile(torr));
+    window.bootSite.torr = torr;
+    loadSite(await getFirstFile(torr),db,lastHash,shaarch);
   }
 
 
@@ -111,15 +124,15 @@ async function blobInStorage(db,hash,blob,magnet,trackers,name) {
 //  window.localStorage.setItem('trackers' + hash,trackers);
 }
 
-async function loadSite(blob) {
+async function loadSite(blob,db,lastHash,shaarch) {
   console.log("LOAD SITE");
   // extract blob and load site
   var zip = new JSZip();
   var zipFiles = await zip.loadAsync(blob);
   var unzipBootBlobs = {};
-  window.unzipBootBlobs = unzipBootBlobs;
-  if (isFirefox()) {
-    window.ffscripttoeval = {};
+  window.bootSite.unzipBootBlobs = unzipBootBlobs;
+  if (!window.bootSite.unsafe) {
+    window.bootSite.ffscripttoeval = {};
   }
   var indexHtml;
   for (var n in zipFiles.files) {
@@ -133,12 +146,12 @@ async function loadSite(blob) {
         fr.readAsText(b);
         await frp;
         indexHtml = fr.result;
-      } else if (file.name.endsWith('.js') && isFirefox()) {
+      } else if (file.name.endsWith('.js') && !window.bootSite.unsafe) {
         var fr = new FileReader();
         var frp = frPromise(fr);
         fr.readAsText(b);
         await frp;
-        window.ffscripttoeval[file.name] = fr.result;
+        window.bootSite.ffscripttoeval[file.name] = fr.result;
       } else {
         var url = URL.createObjectURL(b);
         b.url = url;
@@ -151,7 +164,20 @@ async function loadSite(blob) {
     // should also replace if prefixed with site url
     indexHtml = indexHtml.replace(n,unzipBootBlobs[n]);
   }
-  window.indexBootBlob = indexHtml;
+  window.bootSite.indexBootBlob = indexHtml;
+  // switch envt
+  await SwitchEnvt(db,lastHash, shaarch);
+  // refresh hook
+  window.bootSite.refresh = function() {
+
+    ReplaceContent(indexHtml);
+  };
+  window.bootSite.setUnsafe = function (b) {
+    getDb().then(function(db2) {
+      writeVal(db2,'','unsafe',b);
+    });
+  }
+
   ReplaceContent(indexHtml);
 }
 
@@ -219,20 +245,20 @@ function readVal(db,hash,key) {
 
 function writeVal(db,hash,key,val) {
   return new Promise(function(resolve,reject) {
-        var request = db.transaction(['default'], "readwrite")
-                .objectStore('default')
-                .add(val,key + hash);
+  var request = db.transaction(['default'], "readwrite")
+    .objectStore('default')
+    .put(val,key + hash);
                                  
-        request.onsuccess = function(event) {
-          resolve(event);
-        };
-         
-        request.onerror = function(event) {
-          console.error("error writing in indexeddb" + event);
-          reject(event);
-        }
-         
-});
+  request.onsuccess = function(event) {
+    resolve(event);
+  };
+
+  request.onerror = function(event) {
+    console.error("error writing in indexeddb" + event);
+    reject(event);
+  }
+
+  });
 }
  
 function torrPromise(torr) {
@@ -249,22 +275,66 @@ function frPromise(fr) {
   });
 }
 
+async function SwitchEnvt(db,lastHash, newHash) {
+  if (lastHash !== newHash) {
+    await saveEnvt(db,lastHash);
+    await loadEnvt(db,newHash);
+  } else {
+    // only load newHash context
+    await loadEnvt(db,newHash);
+  }
+}
+async function saveEnvt(db,hash) {
+  var toRem = [];
+  // localstorage
+  for (var i = 0; i < localStorage.length; i++){
+    var key = localStorage.key(i);
+    if (!key.startsWith(bsNs)) {
+      localStorage.setItem(bsNs+hash+key,localStorage.getItem(key));
+      toRem.push(key);
+    }
+  }
+  for (var key of toRem) {
+    localStorage.removeItem(key);
+  }
+  // same thing for indexed db seems to costy (inhability to rename db)
+}
+async function loadEnvt(db,hash) {
+  var toRem = [];
+  var prefix = bsNs+hash;
+  for (var i = 0; i < localStorage.length; i++){
+    var key = localStorage.key(i);
+    if (key.startsWith(prefix)) {
+      localStorage.setItem(key.substring(prefix.length),localStorage.getItem(key));
+      toRem.push(key);
+    }
+  }
+
+  for (var key of toRem) {
+    localStorage.removeItem(key);
+  }
+
+//        bsNs
+  await writeVal(db,'','lastHash',hash);
+}
 function ReplaceContent(NC) {
   let curr = window.location.pathname + window.location.search;
   // allow back after refresh failure
-  window.history.pushState(window.state,"boot",curr);
-  if (isFirefox()) {
+  window.history.pushState({},"boot",curr);
+  // replace hosting to location only
+  window.history.replaceState({},"new",window.location.origin);
+  if (!window.bootSite.unsafe) {
     // TODO regexp it or at least allow uppercase
-    var start = window.indexBootBlob.indexOf("<head>") + 6; 
-    var end = window.indexBootBlob.indexOf("</head>");
-    document.head.innerHTML = window.indexBootBlob.substring(start,end);
-    start = window.indexBootBlob.indexOf("<body>") + 6; 
-    end = window.indexBootBlob.indexOf("</body>");
-    document.body.innerHTML = window.indexBootBlob.substring(start,end);
+    var start = window.bootSite.indexBootBlob.indexOf("<head>") + 6; 
+    var end = window.bootSite.indexBootBlob.indexOf("</head>");
+    document.head.innerHTML = window.bootSite.indexBootBlob.substring(start,end);
+    start = window.bootSite.indexBootBlob.indexOf("<body>") + 6; 
+    end = window.bootSite.indexBootBlob.indexOf("</body>");
+    document.body.innerHTML = window.bootSite.indexBootBlob.substring(start,end);
 
     // eval all new script tag (modernjs)
     document.querySelectorAll('script').forEach((s)=> {
-      var s = window.ffscripttoeval[s.getAttribute('src')];
+      var s = window.bootSite.ffscripttoeval[s.getAttribute('src')];
       if (s != null) {
         eval(s);
       }
